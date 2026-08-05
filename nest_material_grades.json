@@ -1,0 +1,47 @@
+{
+  "SPC1.5": "cr",
+  "SPC2.0": "cr",
+  "SPC3.0": "cr",
+
+  "SPH3.0": "s275",
+  "SPH4.0": "s275",
+  "SPH5.0": "s275",
+  "SPH6.0": "s275",
+  "SPH8.0": "s275",
+  "SPH10.0": "s275",
+
+  "SPH5.0-355-GRADE": "s355",
+  "SPH6.0-355-GRADE": "s355",
+
+  "SS400-3.0": "s275",
+  "SS400-4.0": "s275",
+  "SS400-5.0": "s275",
+  "SS400-6.0": "s275",
+  "SS400-8.0": "s275",
+  "SS400-10.0": "s275",
+  "SS400-12.0": "s275",
+  "SS400-15.0": "s275",
+  "SS400-20.0": "s275",
+
+  "ALU-5251-H22-1.5MM": "aluminium 5251h22",
+  "ALU-5251-H22-2MM": "aluminium 5251h22",
+  "ALU-5251-H22-3MM": "aluminium 5251h22",
+  "ALU-5251-H22-5MM": "aluminium 5251h22",
+
+  "A5052-2.0": "aluminium 5251h22",
+  "A5052-3.0": "aluminium 5251h22",
+  "A5052-4.0": "aluminium 5251h22",
+  "A5052-5.0": "aluminium 5251h22",
+
+  "A1050-1.0": "aluminium 1050a",
+  "A1050-1.5": "aluminium 1050a",
+  "A1050-2.0": "aluminium 1050a",
+  "A1050-3.0": "aluminium 1050a",
+  "A1050-4.0": "aluminium 1050a",
+
+  "GALV-1.0": "galv",
+  "GALV-1.5": "galv",
+  "GALV-2.0": "galv",
+  "GALV-2.5": "galv",
+  "GALV-3.0": "galv"
+}
