@@ -24,12 +24,29 @@ It pulls from three systems and reconciles them against a single canonical list 
 
 Provisional nests are exported from the cutting machine as PDFs and dropped in SharePoint. `parse_used_material_from_pdf()` finds the *Used Material Info* table in each one (matched by its `Sheet Code` / `Material Name` header row) and reads off the raw material consumed.
 
+Two things about these PDFs shape how that function works:
+
+- **Only the front matter is scanned.** The *Used Material Info* table is a summary page at the front; the sheet layout pages behind it hold the cutting geometry — tens of thousands of vector edges each, which pdfminer needs *seconds per page* to load. The parser stops at the first page holding the table and reads at most `max_pages` (default 10). Scanning every page instead cost 55–130s per nest, so a folder of half a dozen made the read take over five minutes.
+- **Merged rows are split back out.** The PDF only rules a line between two rows when the material name changes, so consecutive rows for the same material arrive as one row with newlines inside each cell (`SS400-8.0\nSS400-8.0`). `split_merged_rows()` separates them; without it those sheets were collapsed into one unrecognisable name and dropped from the demand figures.
+
 Machine material names don't match the standard descriptions, so `standardise_material()` bridges them:
 
 - [`nest_material_grades.json`](nest_material_grades.json) maps machine names to grades — `SPH5.0` → `s275`, `ALU-5251-H22-3MM` → `aluminium 5251h22`. Matching is on the **full** name, not a prefix, so `SPH5.0-355-GRADE` resolves to `s355` rather than being mistaken for a plain SPH.
 - Nests often run off remnants. A 1500×1500 piece cut from a 3000×1500 sheet is recorded as **half a sheet**, not a whole one. The function picks the smallest standard sheet the piece could have come from and returns that fractional share, which is multiplied through the process quantity.
 
 Materials that resolve to no standard description are surfaced separately in `debug.py` — they're either cut from a remnant or missing from the mapping.
+
+### Nest caching
+
+`read_material_from_nest()` reads a whole SharePoint folder, so it caches per file rather than all-or-nothing.
+
+`list_files_in_sharepoint_folder()` selects `eTag`, `lastModifiedDateTime` and `size` alongside the id and name. Those form a change key, and `nest_material_cache()` — an `st.cache_resource` dict, so one shared instance rather than a copy per session — holds `{item id: (change key, materials)}`. A nest whose change key still matches is never downloaded again; only new or edited files are fetched. Files that leave the folder are dropped from the cache so it can't grow forever.
+
+The `ttl=900` on `read_material_from_nest()` is now just how often the *folder listing* is refreshed — one cheap Graph call — rather than a full re-download of everything.
+
+Stale files are downloaded through a `ThreadPoolExecutor`, since that half is pure network. Workers call `graph_download_item()`, which deliberately takes pre-resolved headers and site id and makes no Streamlit calls — a `st.cache_data` function called off the main thread has no `ScriptRunContext`. Parsing stays on the main thread: it's CPU bound, so threads wouldn't help.
+
+Two failure modes are contained rather than fatal, because anyone can drop a file in the folder: a download that fails is skipped, and a file pdfplumber can't open is logged and cached as empty so it isn't retried on every read.
 
 ### Bundle joining
 

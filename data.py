@@ -7,6 +7,8 @@ import requests
 from sqlalchemy import text
 import msal
 import pdfplumber
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO,StringIO
 
 # shared helpers
@@ -118,16 +120,39 @@ def download_file_from_sharepoint(site_name: str, file_path: str) -> BytesIO:
     response = graph_get(site_name, f"drive/root:/{file_path}:/content")
     return BytesIO(response.content) if response is not None else None
 
+def graph_download_item(headers: dict, site_id: str, item_id: str) -> BytesIO | None:
+    # download a drive item from already resolved headers and site id
+    # nothing in here touches streamlit, so this is the one that is safe to call off the main
+    # thread - a failure returns None rather than raising so one bad file cannot sink a batch
+    url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/items/{item_id}/content"
+    try:
+        response = requests.get(url, headers=headers, timeout=120)
+    except requests.RequestException as error:
+        print(f"download of {item_id} failed: {error}")
+        return None
+    if not response.ok:
+        print(response.status_code, response.text)
+        return None
+    return BytesIO(response.content)
+
 def download_item_from_sharepoint(site_name: str, item_id: str) -> BytesIO:
     # download a file by drive item id, as listed by list_files_in_sharepoint_folder
-    response = graph_get(site_name, f"drive/items/{item_id}/content")
-    return BytesIO(response.content) if response is not None else None
+    headers = graph_get_headers()
+    site_id = graph_get_site_id(site_name)
+    if headers is None or site_id is None:
+        return None
+    return graph_download_item(headers, site_id, item_id)
 
 @st.cache_data(ttl=900, show_spinner=True)
 def list_files_in_sharepoint_folder(site_name: str, folder_path: str, extension: str = "") -> list[dict]:
-    # list the files in a folder as [{"name": ..., "id": ...}, ...]
+    # list the files in a folder as [{"name": ..., "id": ..., "eTag": ...}, ...]
+    # eTag covers metadata and content, so it moves whenever a file does - it is what lets
+    # callers tell an unchanged file from a changed one without downloading it
     files = []
-    endpoint = f"drive/root:/{folder_path}:/children?$select=id,name,file&$top=200"
+    endpoint = (
+        f"drive/root:/{folder_path}:/children"
+        "?$select=id,name,file,eTag,lastModifiedDateTime,size&$top=200"
+    )
 
     while endpoint:
         response = graph_get(site_name, endpoint)
@@ -138,7 +163,13 @@ def list_files_in_sharepoint_folder(site_name: str, folder_path: str, extension:
         for item in payload.get("value", []):
             # sub folders have no file facet so are skipped
             if "file" in item and item["name"].lower().endswith(extension.lower()):
-                files.append({"name": item["name"], "id": item["id"]})
+                files.append({
+                    "name": item["name"],
+                    "id": item["id"],
+                    "eTag": item.get("eTag"),
+                    "lastModifiedDateTime": item.get("lastModifiedDateTime"),
+                    "size": item.get("size"),
+                })
 
         # graph pages at 200 items
         endpoint = payload.get("@odata.nextLink")
@@ -329,47 +360,98 @@ def standardise_material(material_name: str, material_size: str, thickness: str)
     sheet_area, sheet_length, sheet_width, description = fits[0]
     return description, round(length * width / sheet_area, 4)
 
-def parse_used_material_from_pdf(file: BytesIO) -> list[dict]:
+def split_merged_rows(row: list, count_column: int) -> list[list[str]]:
+    # the nest pdf only rules a line between two rows when the material name changes, so
+    # consecutive rows for the same material come back merged into one row with newlines
+    # inside each cell ("SS400-8.0\nSS400-8.0") - split them back out so both sheets count
+    parts = [str(cell or "").split("\n") for cell in row]
+    count = len(parts[count_column])
+    if count <= 1:
+        return [[clean_cell(cell) for cell in row]]
+
+    # a cell that did not split spans every row it was merged across, so reuse it
+    # a cell that split a different number of times is a wrapped value, so keep it whole
+    return [
+        [clean_cell(part[i] if len(part) == count else " ".join(part)) for part in parts]
+        for i in range(count)
+    ]
+
+def parse_used_material_from_pdf(file: BytesIO, max_pages: int = 10) -> list[dict]:
     # pull the "Used Material Info" page out of a nest pdf
     # that page holds one row per sheet of raw material the schedule consumes
+    # it sits in the front matter, and the sheet layout pages behind it carry tens of thousands
+    # of vector edges each that pdfminer needs seconds apiece to load - so stop at the first page
+    # holding the table, and never walk past the front matter looking for it
     materials = []
 
     with pdfplumber.open(file) as pdf:
-        for page in pdf.pages:
+        for page in pdf.pages[:max_pages]:
+            found = False
             for table in page.extract_tables():
-                table = [[clean_cell(c) for c in row] for row in table]
-
-                # find the used material table by its header row
-                if not table or "Sheet Code" not in table[0] or "Material Name" not in table[0]:
+                if not table:
                     continue
 
-                columns = {name: i for i, name in enumerate(table[0])}
-                for row in table[1:]:
-                    material_name = row[columns["Material Name"]]
-                    if not material_name:
-                        # blank spacer row
-                        continue
+                # find the used material table by its header row
+                header = [clean_cell(cell) for cell in table[0]]
+                if "Sheet Code" not in header or "Material Name" not in header:
+                    continue
 
-                    # material size comes through as "3000.00 x 1500.00"
-                    material_size = row[columns["Material Size"]]
-                    description, sheet_share = standardise_material(
-                        material_name, material_size, row[columns["Thickness"]]
-                    )
+                found = True
+                columns = {name: i for i, name in enumerate(header)}
+                # a quantity never wraps, so its line count is how many rows were merged together
+                count_column = columns["Process Qty"]
 
-                    # quantity is sheets of stock consumed, so a part sheet counts as a fraction
-                    process_qty = cell_to_number(row[columns["Process Qty"]])
-                    quantity = None
-                    if process_qty is not None and sheet_share is not None:
-                        quantity = round(process_qty * sheet_share, 4)
+                for merged_row in table[1:]:
+                    for row in split_merged_rows(merged_row, count_column):
+                        material_name = row[columns["Material Name"]]
+                        if not material_name:
+                            # blank spacer row
+                            continue
 
-                    materials.append({
-                        "material_name": material_name,
-                        "material_size": material_size,
-                        "quantity": quantity,
-                        "description": description,
-                    })
+                        # material size comes through as "3000.00 x 1500.00"
+                        material_size = row[columns["Material Size"]]
+                        description, sheet_share = standardise_material(
+                            material_name, material_size, row[columns["Thickness"]]
+                        )
+
+                        # quantity is sheets of stock consumed, so a part sheet counts as a fraction
+                        process_qty = cell_to_number(row[columns["Process Qty"]])
+                        quantity = None
+                        if process_qty is not None and sheet_share is not None:
+                            quantity = round(process_qty * sheet_share, 4)
+
+                        materials.append({
+                            "material_name": material_name,
+                            "material_size": material_size,
+                            "quantity": quantity,
+                            "description": description,
+                        })
+
+            # a nest layout holds enough objects that releasing them between pages matters
+            page.flush_cache()
+            page.get_textmap.cache_clear()
+            if found:
+                break
 
     return materials
+
+NEST_DOWNLOAD_WORKERS = 8
+
+@st.cache_resource
+def nest_material_cache() -> dict:
+    # {drive item id: (change key, materials)}
+    # cache_resource hands back the one dict rather than a copy, so this survives reruns and is
+    # shared across sessions - which is the point, a nest only gets downloaded and parsed once
+    return {}
+
+# cache_resource objects are shared across sessions, and every session runs its script on its own
+# thread, so guard the read-modify-write
+nest_cache_lock = threading.Lock()
+
+def nest_change_key(file: dict) -> tuple:
+    # what sharepoint says about the file, without downloading it
+    # size and last modified are belt and braces in case eTag ever comes back empty
+    return (file.get("eTag"), file.get("lastModifiedDateTime"), file.get("size"))
 
 @st.cache_data(ttl=900, show_spinner=True)
 def read_material_from_nest() -> dict:
@@ -381,21 +463,58 @@ def read_material_from_nest() -> dict:
         extension=".pdf"
     )
 
-    nests = {}
-    for file in files:
-        bytes_io = download_item_from_sharepoint(NEST_SITE_NAME, file["id"])
-        if bytes_io is None:
-            continue
+    cache = nest_material_cache()
+    with nest_cache_lock:
+        # anything sharepoint reports unchanged is already parsed, so it never gets downloaded
+        stale = [f for f in files if cache.get(f["id"], (None, None))[0] != nest_change_key(f)]
 
-        materials = parse_used_material_from_pdf(bytes_io)
-        if not materials:
-            # no used material page - not a nest pdf
-            print(f"no used material info found in {file['name']}")
-            continue
+    if stale:
+        # resolve the auth up here: the workers must not call streamlit cached functions,
+        # which is also why they use graph_download_item rather than graph_get
+        headers = graph_get_headers()
+        site_id = graph_get_site_id(NEST_SITE_NAME)
+        if headers is None or site_id is None:
+            return {}
 
-        # a bundle can be split over more than one nest pdf, so collect rather than overwrite
-        ref = get_bundle_ref(file["name"])
-        nests.setdefault(ref, []).extend(materials)
+        # downloading is the slow half and is pure network, so overlap the requests
+        # parsing stays on this thread - it is cpu bound, so threads would not buy anything
+        with ThreadPoolExecutor(max_workers=min(NEST_DOWNLOAD_WORKERS, len(stale))) as pool:
+            downloads = pool.map(lambda f: graph_download_item(headers, site_id, f["id"]), stale)
+
+            for file, bytes_io in zip(stale, downloads):
+                if bytes_io is None:
+                    continue
+
+                try:
+                    materials = parse_used_material_from_pdf(bytes_io)
+                except Exception as error:
+                    # anyone can drop a file in the folder - a corrupt or non pdf one should
+                    # cost us that nest, not the whole read
+                    print(f"could not read {file['name']}: {error}")
+                    materials = []
+
+                if not materials:
+                    # no used material page - not a nest pdf
+                    # still cached, so it is only scanned once rather than on every read
+                    print(f"no used material info found in {file['name']}")
+
+                with nest_cache_lock:
+                    cache[file["id"]] = (nest_change_key(file), materials)
+
+    with nest_cache_lock:
+        # forget files that have left the folder, otherwise the cache only ever grows
+        for item_id in set(cache) - {f["id"] for f in files}:
+            del cache[item_id]
+
+        nests = {}
+        for file in files:
+            _, materials = cache.get(file["id"], (None, None))
+            if not materials:
+                continue
+
+            # a bundle can be split over more than one nest pdf, so collect rather than overwrite
+            ref = get_bundle_ref(file["name"])
+            nests.setdefault(ref, []).extend(materials)
 
     return nests
 
