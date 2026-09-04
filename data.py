@@ -263,15 +263,32 @@ def flat_stock_take_save_to_db(df: pd.DataFrame, user: str):
             text('INSERT INTO stock_takes (created_by, data) VALUES (:user, :data)'),
             {"user": user, "data": payload}
         )
+        # overwrite live stock with latest count
+        session.execute(
+            text(
+                """
+                INSERT INTO live_stock (material, quantity, location)
+                VALUES (:Material, :Quantity, :Location)
+                ON CONFLICT (material) DO UPDATE
+                SET quantity = EXCLUDED.quantity, location = EXCLUDED.location
+                """
+            ),
+            df.to_dict(orient="records")
+        )
         session.commit()
 
 def flat_stock_take_read_from_db() -> pd.DataFrame:
     conn = st.connection("sql")
     with conn.session as session:
-        df = conn.query("SELECT * FROM stock_takes")
-    df["data"] = df["data"].apply(json.dumps)
+        df = conn.query("SELECT * FROM stock_takes", ttl=0)
+    df["data"] = df["data"].apply(lambda x: json.loads(x) if isinstance(x, str) else x)
     return df
-    
+
+# live stock data
+def live_stock_read_from_db() -> pd.DataFrame:
+    conn = st.connection("sql")
+    return conn.query("SELECT * FROM live_stock", ttl=0)
+
 # bundles data
 @st.cache_data(show_spinner=True)
 def load_data_sp() -> pd.DataFrame:
@@ -534,3 +551,12 @@ def get_flat_bundle_materials() -> pd.DataFrame:
     return df
 
 # material usage and arrival forms
+def record_material_usage(material: str, quantity: float):
+    conn = st.connection("sql")
+    with conn.session as session:
+        session.execute(
+            text("UPDATE live_stock SET quantity = quantity + :delta WHERE material = :material"),
+            {"delta": quantity, "material": material}
+        )
+        session.commit()
+    return None

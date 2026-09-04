@@ -1,5 +1,6 @@
 streamlit==1.55.0
 pandas==2.3.3
+plotly==6.6.0
 requests==2.33.1
 SQLAlchemy==2.0.51
 psycopg2-binary==2.9.12

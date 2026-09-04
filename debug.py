@@ -48,3 +48,8 @@ st.dataframe(flat_bundles)
 # nests that never found a bundle - the bundle is either finished or not on the staging sheet
 orphan_nests = sorted(set(nest_materials["nest_ref"]) - set(flat_bundles["nest_ref"]))
 st.write(f"nests with no incomplete bundle to join to: {orphan_nests}")
+
+# live stock table
+live_stock = live_stock_read_from_db()
+st.write("live stock table")
+st.dataframe(live_stock)
