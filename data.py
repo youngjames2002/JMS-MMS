@@ -206,10 +206,23 @@ def statii_get_request(session_token: str, report: str, filters: dict | None = N
     df = pd.DataFrame(data["rows"], columns=data["columns"])
     return df
 
+def statii_report(report: str, filters: dict | None = None) -> pd.DataFrame:
+    # statii keeps one live session per set of credentials, so anything else that authenticates
+    # with them - a second deployment, someone running a script - silently kills the token we are
+    # holding, and every request after that comes back 401 until our cached copy times out
+    # so a 401 is not a failure, it is a session that has been taken away: get a new one and go
+    # again. the retry is not itself retried, so bad credentials still fail rather than loop
+    try:
+        return statii_get_request(statii_get_session_token(), report, filters)
+    except requests.HTTPError as error:
+        if error.response is None or error.response.status_code != 401:
+            raise
+        statii_get_session_token.clear()
+        return statii_get_request(statii_get_session_token(), report, filters)
+
 @st.cache_data(ttl=1500)
 def get_po_lines() -> pd.DataFrame:
-    token = statii_get_session_token()
-    df = statii_get_request(token, "purchase_order_lines")
+    df = statii_report("purchase_order_lines")
 
     # clean up df
     DEAD = [
