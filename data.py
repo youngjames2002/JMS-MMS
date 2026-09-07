@@ -269,6 +269,17 @@ def flat_stock_take_generate_empty() -> pd.DataFrame:
 
 def flat_stock_take_save_to_db(df: pd.DataFrame, user: str):
     # save stock take to database
+    # a blank cell arrives as NaN, and NaN is not NULL - it stores as a real numeric value that
+    # then swallows every later "quantity + delta", and a blank location wrote the text "NaN"
+    # the page asks for a full count and says to leave a line blank when there is none in stock,
+    # so a blank quantity is a counted zero
+    df = df.copy()
+    df["Quantity"] = pd.to_numeric(df["Quantity"], errors="coerce").fillna(0.0)
+    df["Location"] = [
+        (str(value).strip() or None) if pd.notna(value) else None
+        for value in df["Location"]
+    ]
+    # history and live stock are written from the same cleaned frame so they cannot disagree
     payload = df.to_json(orient="records")
     conn = st.connection("sql")
     with conn.session as session:
@@ -564,12 +575,21 @@ def get_flat_bundle_materials() -> pd.DataFrame:
     return df
 
 # material usage and arrival forms
-def record_material_usage(material: str, quantity: float):
+def record_material_usage(material: str, quantity: float) -> float:
+    # returns the new stock level, and raises rather than reporting success for a material
+    # that is not in live_stock - a form that says "recorded" while writing nothing is worse
+    # than one that says it could not
     conn = st.connection("sql")
     with conn.session as session:
-        session.execute(
-            text("UPDATE live_stock SET quantity = quantity + :delta WHERE material = :material"),
+        row = session.execute(
+            text(
+                "UPDATE live_stock SET quantity = quantity + :delta"
+                " WHERE material = :material RETURNING quantity"
+            ),
             {"delta": quantity, "material": material}
-        )
+        ).one_or_none()
         session.commit()
-    return None
+
+    if row is None:
+        raise LookupError(f"{material} has never been counted, so there is nothing to add to.")
+    return float(row[0])

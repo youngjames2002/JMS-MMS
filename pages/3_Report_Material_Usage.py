@@ -12,5 +12,12 @@ if submitted:
     if quantity <= 0:
         st.error("Enter a quantity greater than zero.")
     else:
-        record_material_usage(material, -abs(quantity))
-        st.success(f"Recorded {quantity:g} sheet(s) of {material} used.")
+        try:
+            level = record_material_usage(material, -abs(quantity))
+        except LookupError as error:
+            st.error(str(error))
+        else:
+            st.success(
+                f"Recorded {quantity:g} sheet(s) of {material} used. "
+                f"Now {level:g} sheet(s) in stock."
+            )
