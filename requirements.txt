@@ -1,4 +1,5 @@
 streamlit==1.55.0
+Authlib>=1.3.2
 pandas==2.3.3
 plotly==6.6.0
 requests==2.33.1

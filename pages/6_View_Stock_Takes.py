@@ -5,8 +5,9 @@ import streamlit as st
 from data import flat_stock_take_read_from_db, get_standard_descriptions
 import pandas as pd
 import plotly.express as px
+from ui import page_setup
 
-st.title("Stock Take History")
+page_setup("Stock Take History")
 st.markdown("# Latest Stock Take")
 all_sts = flat_stock_take_read_from_db()
 all_sts = all_sts.sort_values("created_at", ascending=False).reset_index(drop=True)

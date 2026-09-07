@@ -2,8 +2,9 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 from data import *
+from ui import page_setup
 
-st.title("Live Stock Dashboard")
+page_setup("Live Stock Dashboard")
 
 
 # bundles & projection

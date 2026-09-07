@@ -1,7 +1,8 @@
 import streamlit as st
 from data import get_standard_descriptions, record_material_usage
+from ui import page_setup
 
-st.title("Report Material Delivery")
+page_setup("Report Material Delivery")
 
 with st.form("material_delivery_form", clear_on_submit=True):
     material = st.selectbox("Material", options=get_standard_descriptions())
