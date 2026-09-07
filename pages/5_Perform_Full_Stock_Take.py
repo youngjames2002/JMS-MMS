@@ -1,7 +1,7 @@
 import streamlit as st
 from data import flat_stock_take_generate_empty, flat_stock_take_save_to_db
 
-st.title("Perform a Stock Take")
+st.title("Perform a Full Stock Take")
 st.markdown("Enter Qty and Location for each material (leave blank if none in stock)")
 
 stock_take_empty = flat_stock_take_generate_empty()
