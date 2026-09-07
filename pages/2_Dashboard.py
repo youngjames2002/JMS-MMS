@@ -59,6 +59,12 @@ st.dataframe(
     weekly[weekly["description"] == material][["week", "needed", "remaining", "bundles"]],
     hide_index=True,
     width="stretch",
+    column_config={
+        "week": st.column_config.DateColumn("Week ending", format="DD MMM"),
+        "needed": st.column_config.NumberColumn("Sheets needed", format="%.2f"),
+        "remaining": st.column_config.NumberColumn("Left after", format="%+.1f"),
+        "bundles": "Bundles",
+    },
 )
 
 @st.cache_data(ttl=900)
@@ -85,14 +91,25 @@ ledger = bundle_ledger()
 by_bundle = ledger.groupby(["nest_ref", "date"], as_index=False).agg(
     job=("Bundle/Job", "first"),
     materials=("description", "nunique"),
-    sheets=("quantity", "sum"),
+    Sheets=("quantity", "sum"),
     short=("remaining", lambda r: int((r < 0).sum())),
-    worst=("remaining", "min"),
-).sort_values(["short", "date"], ascending=[False, True])
+    Worst=("remaining", "min"),
+).sort_values("date")
 
-st.dataframe(by_bundle, hide_index=True, width="stretch")
+by_bundle.drop(columns="job", inplace=True)
+by_bundle.rename(columns={"nest_ref": "Bundle", "date": "Earliest Process Date", "materials": "Different Material Types", "short": "Material Types Short"}, inplace=True)
+st.dataframe(
+    by_bundle,
+    hide_index=True,
+    width="stretch",
+    column_config={
+        "Earliest Process Date": st.column_config.DateColumn(format="DD MMM YYYY"),
+        "Worst": st.column_config.NumberColumn(format="%+.1f"),
+        "Sheets": st.column_config.NumberColumn(format="%.1f"),
+    },
+)
 
-bundle = st.selectbox("Bundle", by_bundle["nest_ref"])
+bundle = st.selectbox("Bundle", by_bundle["Bundle"])
 st.dataframe(
     ledger[ledger["nest_ref"] == bundle][["description", "quantity", "remaining"]],
     hide_index=True,
