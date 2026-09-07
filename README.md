@@ -12,36 +12,39 @@ It pulls from three systems and reconciles them against a single canonical list 
 
 ## Status
 
-**Early development.** The data layer in [`data.py`](data.py) is working and covers SharePoint, Statii, nest parsing, stock takes and live stock. The pages that record and read stock are built: material usage, material delivery, performing a stock take, and stock take history. [`debug.py`](debug.py) is still the harness that exercises each data function end to end.
+**Early development, but running end to end.** [`data.py`](data.py) covers SharePoint, Statii, nest parsing, stock takes and live stock. Every page is built: the dashboard, material usage and delivery, performing a stock take, and stock take history. [`debug.py`](debug.py) remains the harness that exercises each data function on its own.
 
-Not built yet: [`pages/1_login.py`](pages/1_login.py) is empty, so stock takes are attributed to a hardcoded `"username here"` rather than a real user.
+Start it with **`streamlit run login.py`** — that is the entry script, not `debug.py`.
 
-### The dashboard lives on a branch
+### What the numbers depend on
 
-The live stock dashboard is on **`claude-dashboard`**, not on `main`:
+Three feeds bound what the app can show. None of them is a code problem, and the dashboard states each one on the page rather than letting an empty table read as good news:
 
-```bash
-git checkout claude-dashboard
-```
-
-It adds one page, `pages/2_Live_Stock_Dashboard.py`, which puts stock on hand, upcoming bundle demand and incoming purchase orders on a single timeline per material to work out when each one runs short. All of its projection and KPI logic is self-contained in that page — it reads `data.py` but does not change it, so the branch is only that one file.
-
-Two things to know before judging what it shows:
-
-- **The nest folder is stale.** SharePoint currently holds nests for B371–B387, while the incomplete bundles on the staging sheet are B393 onwards, so no bundle joins to a nest and every demand figure is zero. The page reports this rather than showing an empty shortage table as good news.
-- **Almost nothing has been counted.** 163 of the 164 lines in `live_stock` have never had a stock take against them, so there is nothing for the projection to start from.
-
-Neither is a fault in the page; both are the data feeds not flowing yet.
-
-### Known defect: the usage and delivery forms silently do nothing
-
-`live_stock.quantity` is `NOT NULL numeric`, and a blank cell in the stock take editor arrives as a pandas `NaN`, which stores as a literal `'NaN'::numeric`. 163 of the 164 rows currently hold that value.
-
-`record_material_usage()` does `SET quantity = quantity + :delta`, and in Postgres `NaN + 10` is `NaN` — so for those rows the write changes nothing while the form still reports success. `COALESCE` is not the fix: `NaN` is not `NULL`.
-
-Fixing it means converting `NaN` to `None` on the stock take write, backfilling the existing rows, and checking the row count on the update rather than assuming it landed. **Worth doing before the next real stock take**, or the count will write the same values back in.
+- **The projection reaches only as far as the schedule does.** Every incomplete flat bundle on the staging sheet sits inside a five week window, so the dashboard shows five weeks. Widening the view would add empty columns; what limits it is bundles not being scheduled further out.
+- **A bundle with no nest is invisible to demand.** Material it needs looks available, because nothing says otherwise. Roughly a quarter of incomplete bundles are in that state at any time, which is the largest blind spot in the figures.
+- **Purchase orders count only if they are in the future.** `get_po_lines()` filters to `date_promised > today`, so when Statii holds nothing promised ahead the on-order columns read zero for real.
 
 ## How it works
+
+### Login
+
+Streamlit's own OpenID Connect support does the work — there is no MSAL flow to maintain. [`login.py`](login.py) is the entry script and calls `st.login("microsoft")`; `st.user` carries whoever comes back. It needs `Authlib` installed and the `[auth]` / `[auth.microsoft]` blocks in secrets.
+
+Every page begins with `page_setup()` from [`ui.py`](ui.py), which sets the page config, gates on auth, then draws the logo and title row. The gate is **per page** deliberately: a page reached by pasting its URL has to pass the same check as one reached from the sidebar.
+
+Those helpers live in `ui.py` rather than `login.py` for a reason worth keeping. Importing `login.py` from a page executes that file's whole body, so the login screen drew itself on top of whichever page imported it first — and because Python caches the module, *which* page that was varied with what the server had already loaded. `ui.py` renders nothing when imported.
+
+`TEST_MODE = true` in local secrets skips the login entirely. Leave it out of the deployed secrets so auth runs live there.
+
+### The weekly projection
+
+The dashboard answers when each material runs short and which bundles are responsible. It models what the `FlatStock_Report` macro on the Steel Stock workbook produces, one sheet per week.
+
+Demand is collapsed to one row per bundle per material first, so a bundle split across several nest PDFs counts once. Those rows are bucketed into weeks ending Thursday (`pd.offsets.Week(weekday=3).rollforward`), and a cumulative sum down the weeks is subtracted from stock on hand. The week where that balance crosses zero is when the material runs out; the bundle refs carried alongside are why.
+
+Every material is projected against every week rather than only the weeks it appears in, so a quiet week repeats the previous level instead of leaving a hole, and a material nothing is nested against still shows what is on the shelf.
+
+The bundle view groups the same ledger the other way round — by bundle rather than by material — so the two cannot disagree.
 
 ### Canonical stock descriptions
 
@@ -98,6 +101,19 @@ pip install -r requirements.txt
 Create `.streamlit/secrets.toml` (gitignored — never commit it):
 
 ```toml
+# skips the microsoft login while developing locally - omit it from deployed secrets
+TEST_MODE = true
+
+[auth]
+# must match a redirect uri registered on the azure app registration, ending /oauth2callback
+redirect_uri = "http://localhost:8501/oauth2callback"
+cookie_secret = "..."   # any long random string; streamlit signs the login cookie with it
+
+[auth.microsoft]
+client_id = "..."
+client_secret = "..."
+server_metadata_url = "https://login.microsoftonline.com/<TENANT_ID>/v2.0/.well-known/openid-configuration"
+
 [sharepoint]
 TENANT_ID = "..."
 CLIENT_ID = "..."
@@ -122,7 +138,13 @@ The database needs two tables:
 - `stock_takes` — `created_by` and `data` columns, plus a `created_at` default; `data` holds the whole stock take as JSON.
 - `live_stock` — `material` (primary key), `quantity` and `location`. This is the running total: a stock take overwrites it, and the usage and delivery forms move it from either direction.
 
-Run the debug harness:
+Run the app:
+
+```bash
+streamlit run login.py
+```
+
+Or the data harness on its own:
 
 ```bash
 streamlit run debug.py
@@ -131,16 +153,18 @@ streamlit run debug.py
 ## Layout
 
 ```
+login.py                                entry script and login page
+ui.py                                   page_setup: auth gate, logo, title row
 data.py                                 all data access and parsing logic
-debug.py                                harness exercising every function
+debug.py                                harness exercising every data function
+assets/logo.jpg                         drawn by ui.render_logo
 flat_stock_standard_descriptions.json   164 canonical stock descriptions
 nest_material_grades.json               machine material name -> grade
 pages/
-  1_login.py                            empty, not yet implemented
-  2_Dashboard.py                        empty on main - see the claude-dashboard branch
+  2_Dashboard.py                        weekly projection, bundles, locations, movement
   3_Report_Material_Usage.py            takes sheets off live stock
   4_Report_Material_Delivery.py         puts sheets back on
-  5_Perform_Stock_Take.py               count every line, overwrites live stock
+  5_Perform_Full_Stock_Take.py          count every line, overwrites live stock
   6_View_Stock_Takes.py                 latest count, history per material, past takes
 ```
 
@@ -149,3 +173,7 @@ pages/
 - Graph and Statii calls are wrapped in `st.cache_data` with a 15–25 minute TTL to keep the app responsive against slow upstream APIs.
 - `data.py` reads Statii secrets at import time, so the app will fail on startup rather than at first use if they're missing.
 - The database reads (`live_stock_read_from_db`, `flat_stock_take_read_from_db`) pass `ttl=0` rather than caching. Stock on hand is the one number that has to be current, and both are cheap queries.
+- **A blank cell in the stock take editor is a counted zero**, and `flat_stock_take_save_to_db()` converts it before writing. This matters more than it looks: a blank arrives as a pandas `NaN`, and `NaN` is not `NULL` — it stores as a real numeric value that then swallows every later `quantity + delta`, so usage and delivery forms wrote nothing while still reporting success. `COALESCE` does not help. Sanitise at the point of writing.
+- `record_material_usage()` returns the new level via `RETURNING` and raises when no row matched, rather than committing nothing and reporting success.
+- `.streamlit/config.toml` pins `[theme] base = "light"`, matching the Data Visualiser. Viewers can still switch themes in their own browser settings menu; `[client] toolbarMode` is what hides that.
+- `demo_data/` is gitignored and exists only on the machine that created it. It holds scripts that load sample stock and stock takes into the database for reviewing the dashboard, plus the backup they restore from.
