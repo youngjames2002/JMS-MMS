@@ -9,6 +9,18 @@ page_setup("Live Stock Dashboard")
 
 # bundles & projection
 @st.cache_data(ttl=900)
+def on_order_by_material() -> pd.Series:
+    try:
+        po = get_po_lines()
+    except Exception as error:
+        print(f"purchase orders unavailable: {error}")
+        return pd.Series(dtype="float64")
+    if po.empty:
+        return pd.Series(dtype="float64")
+    return po.groupby("description")["quantity_outstanding"].sum()
+
+
+@st.cache_data(ttl=900)
 def weekly_projection() -> pd.DataFrame:
     # sheets left per material after each week's bundles are cut, and which bundles they were
     demand = get_flat_bundles()
@@ -23,8 +35,6 @@ def weekly_projection() -> pd.DataFrame:
         .agg(needed=("quantity", "sum"), bundles=("nest_ref", ", ".join))
     )
     stock = live_stock_read_from_db().set_index("material")["quantity"]
-    # every material against every week, so a quiet week carries the level forward rather
-    # than leaving a hole, and a material nothing is nested against still shows its stock
     materials = stock.index.union(used.index.get_level_values("description").unique())
     weeks = used.index.get_level_values("week").unique().sort_values()
     weekly = used.reindex(pd.MultiIndex.from_product([materials, weeks],
@@ -34,17 +44,20 @@ def weekly_projection() -> pd.DataFrame:
 
     weekly = weekly.reset_index()
     weekly["stock"] = weekly["description"].map(stock).fillna(0.0)
-    # cumulative usage, so weeks with no usage repeat the previous week's number
     weekly["remaining"] = weekly["stock"] - weekly.groupby("description")["needed"].cumsum()
+    weekly["on_order"] = weekly["description"].map(on_order_by_material()).fillna(0.0)
+    weekly["net"] = weekly["remaining"] + weekly["on_order"]
 
     return weekly
 
 st.markdown("## Weekly Projection")
 weekly = weekly_projection()
 
-grid = weekly.pivot(index="description", columns="week", values="remaining")
+grid = weekly.pivot(index="description", columns="week", values="net")
 grid.columns = [f"w/e {c:%d %b}" for c in grid.columns]
-grid = grid.loc[grid.min(axis=1).sort_values().index]  # worst first
+week_cols = list(grid.columns)
+grid.insert(0, "On order", weekly.groupby("description")["on_order"].first())
+grid = grid.loc[grid[week_cols].min(axis=1).sort_values().index]  # worst net first
 
 
 def shade(value):
@@ -53,25 +66,31 @@ def shade(value):
     return "background-color: #fef0c7" if value <= 0.5 else ""
 
 
-st.dataframe(grid.style.map(shade).format("{:+.1f}", na_rep="—"), width="stretch")
+st.dataframe(
+    grid.style
+    .map(shade, subset=week_cols)
+    .format("{:+.1f}", subset=week_cols, na_rep="—")
+    .format("{:.0f}", subset=["On order"]),
+    width="stretch",
+)
 
 material = st.selectbox("Material", grid.index)
 st.dataframe(
-    weekly[weekly["description"] == material][["week", "needed", "remaining", "bundles"]],
+    weekly[weekly["description"] == material][["week", "needed", "remaining", "on_order", "net", "bundles"]],
     hide_index=True,
     width="stretch",
     column_config={
         "week": st.column_config.DateColumn("Week ending", format="DD MMM"),
         "needed": st.column_config.NumberColumn("Sheets needed", format="%.2f"),
-        "remaining": st.column_config.NumberColumn("Left after", format="%+.1f"),
+        "remaining": st.column_config.NumberColumn("Stock only", format="%+.1f"),
+        "on_order": st.column_config.NumberColumn("On order", format="%.0f"),
+        "net": st.column_config.NumberColumn("Net after orders", format="%+.1f"),
         "bundles": "Bundles",
     },
 )
 
 @st.cache_data(ttl=900)
 def bundle_ledger() -> pd.DataFrame:
-    # one row per bundle per material, with what is left of that material once this
-    # bundle has been cut - the same running balance, kept at bundle grain
     demand = get_flat_bundles()
     demand = demand[demand["description"].notna()].copy()
     demand["date"] = pd.to_datetime(demand["Earliest Process Date"])
@@ -80,9 +99,11 @@ def bundle_ledger() -> pd.DataFrame:
         .sort_values(["description", "date", "nest_ref"])
     )
     stock = live_stock_read_from_db().set_index("material")["quantity"]
-    ledger["remaining"] = ledger["description"].map(stock).fillna(0) - ledger.groupby(
+    ledger["physical"] = ledger["description"].map(stock).fillna(0) - ledger.groupby(
         "description"
     )["quantity"].cumsum()
+    ledger["on_order"] = ledger["description"].map(on_order_by_material()).fillna(0)
+    ledger["remaining"] = ledger["physical"] + ledger["on_order"]
     return ledger
 
 
@@ -112,9 +133,16 @@ st.dataframe(
 
 bundle = st.selectbox("Bundle", by_bundle["Bundle"])
 st.dataframe(
-    ledger[ledger["nest_ref"] == bundle][["description", "quantity", "remaining"]],
+    ledger[ledger["nest_ref"] == bundle][["description", "quantity", "physical", "on_order", "remaining"]],
     hide_index=True,
     width="stretch",
+    column_config={
+        "description": "Material",
+        "quantity": st.column_config.NumberColumn("Sheets needed", format="%.2f"),
+        "physical": st.column_config.NumberColumn("Stock only", format="%+.1f"),
+        "on_order": st.column_config.NumberColumn("On order", format="%.0f"),
+        "remaining": st.column_config.NumberColumn("Net after orders", format="%+.1f"),
+    },
 )
 
 
@@ -136,6 +164,9 @@ st.markdown("## Change Since Last Full Stock Take")
 stc1,stc2=st.columns(2)
 
 all_sts = flat_stock_take_read_from_db()
+if all_sts.empty:
+    st.info("No stock takes recorded yet, so there is nothing to compare live stock against.")
+    st.stop()
 all_sts = all_sts.sort_values("created_at", ascending=False).reset_index(drop=True)
 all_sts["formatted_date"] = all_sts["created_at"].dt.strftime("%B %d, %Y at %I:%M %p")
 latest_st_row = all_sts.iloc[0]
@@ -164,3 +195,28 @@ st.dataframe(
     hide_index=True,
     column_config={"Change": st.column_config.NumberColumn("Change", format="%+.1f")}
 )
+
+# po lines
+st.markdown("## Incoming Orders")
+try:
+    po_lines = get_po_lines()
+except Exception as error:
+    print(f"purchase orders unavailable: {error}")
+    st.warning("Could not reach Statii, so incoming orders are unavailable just now.")
+    po_lines = None
+
+if po_lines is not None and po_lines.empty:
+    st.info("Nothing is currently on order.")
+elif po_lines is not None:
+    st.dataframe(
+        po_lines[["number", "supplier", "description", "quantity_outstanding", "date_promised"]].sort_values("date_promised"),
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "number": "Order Number",
+            "supplier": "Supplier",
+            "description": "Material",
+            "quantity_outstanding": st.column_config.NumberColumn("Sheets Outstanding", format="%.1f"),
+            "date_promised": st.column_config.DateColumn("Date Promised", format="DD MMM YYYY"),
+        },
+    )

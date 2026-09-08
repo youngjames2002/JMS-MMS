@@ -5,11 +5,12 @@ import streamlit as st
 from data import flat_stock_take_read_from_db, get_standard_descriptions
 import pandas as pd
 import plotly.express as px
-from ui import page_setup
+from ui import page_setup, stop_if_empty
 
 page_setup("Stock Take History")
 st.markdown("# Latest Stock Take")
 all_sts = flat_stock_take_read_from_db()
+stop_if_empty(all_sts, "No stock takes have been recorded yet. Use **Perform a Full Stock Take** to record the first one.")
 all_sts = all_sts.sort_values("created_at", ascending=False).reset_index(drop=True)
 all_sts["formatted_date"] = all_sts["created_at"].dt.strftime("%B %d, %Y at %I:%M %p")
 latest_st_row = all_sts.iloc[0]

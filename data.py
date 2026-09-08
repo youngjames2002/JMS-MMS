@@ -5,6 +5,7 @@ import re
 from pathlib import Path
 import requests
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 import msal
 import pdfplumber
 import threading
@@ -244,17 +245,13 @@ def get_po_lines() -> pd.DataFrame:
         df[c] = pd.to_datetime(df[c], format="%Y-%m-%d %H:%M:%S", errors="coerce")
 
     # filters
-    # filter to only arriving today onwards
-    # this data is only used for projecting future stock, as current stock should be up to date through stock take + forms
-    df = df[df["date_promised"] > pd.Timestamp.today()]
+    df["quantity_outstanding"] = pd.to_numeric(df["quantity_outstanding"], errors="coerce")
+    df = df[df["quantity_outstanding"] > 0]
     # filter to just flat stock
     # matches PO description to standardised list in config file
     STANDARD_DESCRIPTIONS = get_standard_descriptions()
     df = df[df["description"].isin(STANDARD_DESCRIPTIONS)]
-
-    # filter out cancelled orders
     df = df[df["po_status"] != "Cancelled"]
-
     return df
 
 def get_standard_descriptions() -> list:
@@ -269,10 +266,6 @@ def flat_stock_take_generate_empty() -> pd.DataFrame:
 
 def flat_stock_take_save_to_db(df: pd.DataFrame, user: str):
     # save stock take to database
-    # a blank cell arrives as NaN, and NaN is not NULL - it stores as a real numeric value that
-    # then swallows every later "quantity + delta", and a blank location wrote the text "NaN"
-    # the page asks for a full count and says to leave a line blank when there is none in stock,
-    # so a blank quantity is a counted zero
     df = df.copy()
     df["Quantity"] = pd.to_numeric(df["Quantity"], errors="coerce").fillna(0.0)
     df["Location"] = [
@@ -303,15 +296,25 @@ def flat_stock_take_save_to_db(df: pd.DataFrame, user: str):
 
 def flat_stock_take_read_from_db() -> pd.DataFrame:
     conn = st.connection("sql")
-    with conn.session as session:
+    try:
         df = conn.query("SELECT * FROM stock_takes", ttl=0)
+    except SQLAlchemyError as error:
+        db_unavailable(error)
     df["data"] = df["data"].apply(lambda x: json.loads(x) if isinstance(x, str) else x)
     return df
 
 # live stock data
+def db_unavailable(error: Exception):
+    print(f"database error: {error}")
+    st.error("Could not reach the database just now. Refresh the page to try again.")
+    st.stop()
+
 def live_stock_read_from_db() -> pd.DataFrame:
     conn = st.connection("sql")
-    return conn.query("SELECT * FROM live_stock", ttl=0)
+    try:
+        return conn.query("SELECT * FROM live_stock", ttl=0)
+    except SQLAlchemyError as error:
+        db_unavailable(error)
 
 # bundles data
 @st.cache_data(show_spinner=True)

@@ -1,13 +1,7 @@
-# shared page furniture: the auth gate, the logo, and the header row every page starts with
-# this module deliberately renders nothing when imported - login.py used to hold these helpers,
-# and importing it from a page re-ran its whole body, so the login screen appeared on top of
-# whichever page happened to import it first
 import streamlit as st
 
 
 def require_auth():
-    # every page calls this, so a page reached by url rather than the sidebar is still gated
-    # TEST_MODE lives only in local secrets.toml; deployed secrets omit it, so auth runs live
     if st.secrets.get("TEST_MODE", False):
         return
     if not st.user.is_logged_in:
@@ -25,6 +19,13 @@ def current_user() -> str:
 
 def render_logo(col):
     col.image("assets/logo.jpg", width=500)
+
+
+def stop_if_empty(df, message: str):
+    if df is None or df.empty:
+        st.info(message)
+        st.stop()
+    return df
 
 
 def page_setup(title: str):
