@@ -184,8 +184,9 @@ if all_sts.empty:
 all_sts = all_sts.sort_values("created_at", ascending=False).reset_index(drop=True)
 all_sts["formatted_date"] = all_sts["created_at"].dt.strftime("%B %d, %Y at %I:%M %p")
 latest_st_row = all_sts.iloc[0]
-# time since taken
-today = pd.Timestamp.now(tz="UTC").normalize()
+# time since taken - created_at arrives as a naive Europe/London wall-clock, so compare it
+# against today in the same zone rather than a tz-aware UTC now (naive minus aware would raise)
+today = pd.Timestamp.now(tz="Europe/London").tz_localize(None).normalize()
 days_since = (today - latest_st_row["created_at"].normalize()).days
 stc1.write(f"{days_since} Day(s) since last Stock Take")
 stc1.write(f"Taken By {latest_st_row['created_by']} on {latest_st_row['formatted_date']}")

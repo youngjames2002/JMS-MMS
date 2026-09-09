@@ -295,9 +295,19 @@ def flat_stock_take_save_to_db(df: pd.DataFrame, user: str):
         session.commit()
 
 def flat_stock_take_read_from_db() -> pd.DataFrame:
+    # created_at is stored as timestamptz (an absolute UTC instant). psycopg2 hands that to
+    # pandas, which normalises every tz-aware column back to UTC, so the pages would render an
+    # hour behind through the summer whatever the session timezone is. converting to a naive
+    # Europe/London wall-clock here, in the database, is the fix pandas cannot undo - the app
+    # then just displays what it is given, with no timezone maths of its own
     conn = st.connection("sql")
     try:
-        df = conn.query("SELECT * FROM stock_takes", ttl=0)
+        df = conn.query(
+            "SELECT id, created_by, data,"
+            " (created_at AT TIME ZONE 'Europe/London') AS created_at"
+            " FROM stock_takes",
+            ttl=0,
+        )
     except SQLAlchemyError as error:
         db_unavailable(error)
     df["data"] = df["data"].apply(lambda x: json.loads(x) if isinstance(x, str) else x)

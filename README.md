@@ -142,12 +142,14 @@ The database needs three tables:
   ```sql
   CREATE TABLE material_movements (
       id         SERIAL PRIMARY KEY,
-      created_at TIMESTAMP NOT NULL DEFAULT now(),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       created_by TEXT,
       material   TEXT,
       quantity   NUMERIC
   );
   ```
+
+Both `created_at` columns are `timestamptz`, so they store an absolute instant (internally UTC) rather than a naive wall-clock. Anything that reads them for display must convert to UK local time in SQL — see the timezone note below.
 
 Run the app:
 
@@ -186,5 +188,6 @@ pages/
 - The database reads (`live_stock_read_from_db`, `flat_stock_take_read_from_db`) pass `ttl=0` rather than caching. Stock on hand is the one number that has to be current, and both are cheap queries.
 - **A blank cell in the stock take editor is a counted zero**, and `flat_stock_take_save_to_db()` converts it before writing. This matters more than it looks: a blank arrives as a pandas `NaN`, and `NaN` is not `NULL` — it stores as a real numeric value that then swallows every later `quantity + delta`, so usage and delivery forms wrote nothing while still reporting success. `COALESCE` does not help. Sanitise at the point of writing.
 - `record_material_usage()` returns the new level via `RETURNING` and raises when no row matched, rather than committing nothing and reporting success.
+- **Timezone is handled in SQL, not in Python.** The pages format `created_at` straight to text with `strftime` and do no timezone maths, so the database has to hand back UK local time. The catch: `pd.read_sql` (which `st.connection().query()` uses) **normalises every tz-aware column to UTC**, so a `timestamptz` renders an hour behind through BST no matter what the session timezone is set to. Setting the session timezone alone (e.g. `ALTER DATABASE ... SET timezone`) therefore does **not** fix the app. The fix is to convert in the query and return a **naive** Europe/London wall-clock — `... (created_at AT TIME ZONE 'Europe/London') AS created_at ...` — which pandas leaves untouched. `flat_stock_take_read_from_db()` does this; any future query that displays a `timestamptz` (e.g. a `material_movements` viewer) must do the same. `Europe/London` tracks BST/GMT automatically, unlike a fixed `+01:00`. The stored instants stay UTC and are never rewritten. The database's own default timezone is also set to `Europe/London` (`ALTER DATABASE postgres` / `ALTER ROLE postgres SET timezone`) so psql and the Supabase SQL editor show local time too, but that is a convenience for interactive use, not what fixes the pages. (Aside: the connection runs through Supabase's session-mode pooler on port 5432, whose warm backends cache their startup timezone default until they recycle — another reason not to rely on the session default.)
 - `.streamlit/config.toml` pins `[theme] base = "light"`, matching the Data Visualiser. Viewers can still switch themes in their own browser settings menu; `[client] toolbarMode` is what hides that.
 - `demo_data/` is gitignored and exists only on the machine that created it. It holds scripts that load sample stock and stock takes into the database for reviewing the dashboard, plus the backup they restore from.
