@@ -1,6 +1,6 @@
 import streamlit as st
 from data import get_standard_descriptions, record_material_usage
-from ui import page_setup
+from ui import current_user, page_setup
 
 page_setup("Report Material Usage")
 
@@ -14,7 +14,7 @@ if submitted:
         st.error("Enter a quantity greater than zero.")
     else:
         try:
-            level = record_material_usage(material, -abs(quantity))
+            level = record_material_usage(material, -abs(quantity), current_user())
         except LookupError as error:
             st.error(str(error))
         else:

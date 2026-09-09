@@ -133,10 +133,21 @@ password = "..."
 database = "..."
 ```
 
-The database needs two tables:
+The database needs three tables:
 
 - `stock_takes` — `created_by` and `data` columns, plus a `created_at` default; `data` holds the whole stock take as JSON.
 - `live_stock` — `material` (primary key), `quantity` and `location`. This is the running total: a stock take overwrites it, and the usage and delivery forms move it from either direction.
+- `material_movements` — `created_by`, `material`, `quantity` (signed: negative for usage, positive for delivery) and a `created_at` default. Every usage and delivery form submission logs one row here, so who moved what is recorded even though `live_stock` only keeps the running total. Create it with:
+
+  ```sql
+  CREATE TABLE material_movements (
+      id         SERIAL PRIMARY KEY,
+      created_at TIMESTAMP NOT NULL DEFAULT now(),
+      created_by TEXT,
+      material   TEXT,
+      quantity   NUMERIC
+  );
+  ```
 
 Run the app:
 

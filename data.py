@@ -578,10 +578,11 @@ def get_flat_bundle_materials() -> pd.DataFrame:
     return df
 
 # material usage and arrival forms
-def record_material_usage(material: str, quantity: float) -> float:
+def record_material_usage(material: str, quantity: float, user: str) -> float:
     # returns the new stock level, and raises rather than reporting success for a material
     # that is not in live_stock - a form that says "recorded" while writing nothing is worse
     # than one that says it could not
+    # quantity is signed: negative off the usage form, positive off the delivery form
     conn = st.connection("sql")
     with conn.session as session:
         row = session.execute(
@@ -591,8 +592,22 @@ def record_material_usage(material: str, quantity: float) -> float:
             ),
             {"delta": quantity, "material": material}
         ).one_or_none()
+
+        if row is None:
+            # nothing moved, so roll back rather than leave a movement attributed to stock
+            # that was never touched
+            session.rollback()
+            raise LookupError(f"{material} has never been counted, so there is nothing to add to.")
+
+        # log who moved it, in the same transaction as the stock change so the two cannot
+        # disagree - a movement against whoever reported it, same as a stock take is
+        session.execute(
+            text(
+                "INSERT INTO material_movements (created_by, material, quantity)"
+                " VALUES (:user, :material, :quantity)"
+            ),
+            {"user": user, "material": material, "quantity": quantity}
+        )
         session.commit()
 
-    if row is None:
-        raise LookupError(f"{material} has never been counted, so there is nothing to add to.")
     return float(row[0])
