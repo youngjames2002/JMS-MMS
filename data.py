@@ -324,7 +324,7 @@ def load_data_sp() -> pd.DataFrame:
         file_path="JMS Engineering Team SharePoint/JMS Master Schedule/testAutomation/bundleStagingSheet.xlsx"
     )
     if bytes_io is None:
-        return pd.DataFrame()  # return empty DataFrame if download failed
+        raise RuntimeError("Could not download bundle sheet from SharePoint")
 
     df = pd.read_excel(bytes_io)
 

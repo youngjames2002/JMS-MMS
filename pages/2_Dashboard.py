@@ -50,44 +50,51 @@ def weekly_projection() -> pd.DataFrame:
 
     return weekly
 
-st.markdown("## Weekly Projection")
-weekly = weekly_projection()
-
-grid = weekly.pivot(index="description", columns="week", values="net")
-grid.columns = [f"w/e {c:%d %b}" for c in grid.columns]
-week_cols = list(grid.columns)
-grid.insert(0, "On order", weekly.groupby("description")["on_order"].first())
-grid = grid.loc[grid[week_cols].min(axis=1).sort_values().index]  # worst net first
-
-
 def shade(value):
     if value < 0:
         return "background-color: #fee4e2"
     return "background-color: #fef0c7" if value <= 0.5 else ""
 
 
-st.dataframe(
-    grid.style
-    .map(shade, subset=week_cols)
-    .format("{:+.1f}", subset=week_cols, na_rep="—")
-    .format("{:.0f}", subset=["On order"]),
-    width="stretch",
-)
+st.markdown("## Weekly Projection")
+# reads the bundle staging sheet from SharePoint - if that is unavailable, warn and skip this
+# section (like the Statii handling below) so the stock sections further down still render
+try:
+    weekly = weekly_projection()
+except Exception as error:
+    print(f"bundle staging sheet unavailable: {error}")
+    st.warning("Could not reach SharePoint, so the weekly projection is unavailable just now. Stock levels below are unaffected.")
+    weekly = None
 
-material = st.selectbox("Material", grid.index)
-st.dataframe(
-    weekly[weekly["description"] == material][["week", "needed", "remaining", "on_order", "net", "bundles"]],
-    hide_index=True,
-    width="stretch",
-    column_config={
-        "week": st.column_config.DateColumn("Week ending", format="DD MMM"),
-        "needed": st.column_config.NumberColumn("Sheets needed", format="%.2f"),
-        "remaining": st.column_config.NumberColumn("Stock only", format="%+.1f"),
-        "on_order": st.column_config.NumberColumn("On order", format="%.0f"),
-        "net": st.column_config.NumberColumn("Net after orders", format="%+.1f"),
-        "bundles": "Bundles",
-    },
-)
+if weekly is not None:
+    grid = weekly.pivot(index="description", columns="week", values="net")
+    grid.columns = [f"w/e {c:%d %b}" for c in grid.columns]
+    week_cols = list(grid.columns)
+    grid.insert(0, "On order", weekly.groupby("description")["on_order"].first())
+    grid = grid.loc[grid[week_cols].min(axis=1).sort_values().index]  # worst net first
+
+    st.dataframe(
+        grid.style
+        .map(shade, subset=week_cols)
+        .format("{:+.1f}", subset=week_cols, na_rep="—")
+        .format("{:.0f}", subset=["On order"]),
+        width="stretch",
+    )
+
+    material = st.selectbox("Material", grid.index)
+    st.dataframe(
+        weekly[weekly["description"] == material][["week", "needed", "remaining", "on_order", "net", "bundles"]],
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "week": st.column_config.DateColumn("Week ending", format="DD MMM"),
+            "needed": st.column_config.NumberColumn("Sheets needed", format="%.2f"),
+            "remaining": st.column_config.NumberColumn("Stock only", format="%+.1f"),
+            "on_order": st.column_config.NumberColumn("On order", format="%.0f"),
+            "net": st.column_config.NumberColumn("Net after orders", format="%+.1f"),
+            "bundles": "Bundles",
+        },
+    )
 
 @st.cache_data(ttl=900)
 def bundle_ledger() -> pd.DataFrame:
@@ -108,42 +115,49 @@ def bundle_ledger() -> pd.DataFrame:
 
 
 st.markdown("## Bundles Waiting On Material")
-ledger = bundle_ledger()
+# also depends on the SharePoint staging sheet, so degrade the same way
+try:
+    ledger = bundle_ledger()
+except Exception as error:
+    print(f"bundle staging sheet unavailable: {error}")
+    st.warning("Could not reach SharePoint, so the bundle list is unavailable just now.")
+    ledger = None
 
-by_bundle = ledger.groupby(["nest_ref", "date"], as_index=False).agg(
-    job=("Bundle/Job", "first"),
-    materials=("description", "nunique"),
-    Sheets=("quantity", "sum"),
-    short=("remaining", lambda r: int((r < 0).sum())),
-    Worst=("remaining", "min"),
-).sort_values("date")
+if ledger is not None:
+    by_bundle = ledger.groupby(["nest_ref", "date"], as_index=False).agg(
+        job=("Bundle/Job", "first"),
+        materials=("description", "nunique"),
+        Sheets=("quantity", "sum"),
+        short=("remaining", lambda r: int((r < 0).sum())),
+        Worst=("remaining", "min"),
+    ).sort_values("date")
 
-by_bundle.drop(columns="job", inplace=True)
-by_bundle.rename(columns={"nest_ref": "Bundle", "date": "Earliest Process Date", "materials": "Different Material Types", "short": "Material Types Short"}, inplace=True)
-st.dataframe(
-    by_bundle,
-    hide_index=True,
-    width="stretch",
-    column_config={
-        "Earliest Process Date": st.column_config.DateColumn(format="DD MMM YYYY"),
-        "Worst": st.column_config.NumberColumn(format="%+.1f"),
-        "Sheets": st.column_config.NumberColumn(format="%.1f"),
-    },
-)
+    by_bundle.drop(columns="job", inplace=True)
+    by_bundle.rename(columns={"nest_ref": "Bundle", "date": "Earliest Process Date", "materials": "Different Material Types", "short": "Material Types Short"}, inplace=True)
+    st.dataframe(
+        by_bundle,
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "Earliest Process Date": st.column_config.DateColumn(format="DD MMM YYYY"),
+            "Worst": st.column_config.NumberColumn(format="%+.1f"),
+            "Sheets": st.column_config.NumberColumn(format="%.1f"),
+        },
+    )
 
-bundle = st.selectbox("Bundle", by_bundle["Bundle"])
-st.dataframe(
-    ledger[ledger["nest_ref"] == bundle][["description", "quantity", "physical", "on_order", "remaining"]],
-    hide_index=True,
-    width="stretch",
-    column_config={
-        "description": "Material",
-        "quantity": st.column_config.NumberColumn("Sheets needed", format="%.2f"),
-        "physical": st.column_config.NumberColumn("Stock only", format="%+.1f"),
-        "on_order": st.column_config.NumberColumn("On order", format="%.0f"),
-        "remaining": st.column_config.NumberColumn("Net after orders", format="%+.1f"),
-    },
-)
+    bundle = st.selectbox("Bundle", by_bundle["Bundle"])
+    st.dataframe(
+        ledger[ledger["nest_ref"] == bundle][["description", "quantity", "physical", "on_order", "remaining"]],
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "description": "Material",
+            "quantity": st.column_config.NumberColumn("Sheets needed", format="%.2f"),
+            "physical": st.column_config.NumberColumn("Stock only", format="%+.1f"),
+            "on_order": st.column_config.NumberColumn("On order", format="%.0f"),
+            "remaining": st.column_config.NumberColumn("Net after orders", format="%+.1f"),
+        },
+    )
 
 
 # stock by location
