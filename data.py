@@ -621,3 +621,10 @@ def record_material_usage(material: str, quantity: float, user: str) -> float:
         session.commit()
 
     return float(row[0])
+
+# material movements data
+def get_material_movements() -> pd.DataFrame:
+    conn = st.connection("sql")
+    with conn.session as session:
+        result = session.execute(text("SELECT * FROM material_movements"))
+        return pd.DataFrame(result.fetchall())
