@@ -115,7 +115,7 @@ def graph_get(site_name: str, endpoint: str) -> requests.Response:
         response.raise_for_status()
     return response
 
-@st.cache_data(show_spinner=True)
+# not cached - callers cache the parsed result, and a cache here with no ttl froze the file at its first download
 def download_file_from_sharepoint(site_name: str, file_path: str) -> BytesIO:
     # download a file by its path in the document library and return a bytesIO object
     response = graph_get(site_name, f"drive/root:/{file_path}:/content")
@@ -327,7 +327,8 @@ def live_stock_read_from_db() -> pd.DataFrame:
         db_unavailable(error)
 
 # bundles data
-@st.cache_data(show_spinner=True)
+# ttl so bundles marked complete on the sheet drop off - without one the first download was kept until restart
+@st.cache_data(ttl=900, show_spinner=True)
 def load_data_sp() -> pd.DataFrame:
     bytes_io = download_file_from_sharepoint(
         site_name="JMSEngineeringTeam",
@@ -357,10 +358,14 @@ def get_flat_bundles() -> pd.DataFrame:
     df = df[df["Type"] == "FLAT"]
     # filter incomplete only
     # only checking laser complete here as those are what need material - cut but not folded means material is already there and used
-    df = df[df['Completed?'] == 'No']
-
     # both sides go through the same ref extraction, so "B343 (355 & GALV)" still finds the B343 nest
     df["nest_ref"] = df["Bundle/Job"].apply(get_bundle_ref)
+
+    # a bundle can be on the sheet more than once under the same bundle-ID (B414 was added twice) -
+    # once any copy is marked complete the whole bundle is done, so drop every row sharing that id.
+    # matched on bundle-ID not bundle number, as bundle numbers reset at year end
+    completed_ids = df.loc[df["Completed?"] == "Yes", "bundle-ID"].dropna()
+    df = df[(df["Completed?"] == "No") & ~df["bundle-ID"].isin(completed_ids)]
 
     # one row per material per bundle - bundles with no nest yet keep their row with no material against it
     df = df.merge(get_flat_bundle_materials(), on="nest_ref", how="left")
@@ -626,5 +631,10 @@ def record_material_usage(material: str, quantity: float, user: str) -> float:
 def get_material_movements() -> pd.DataFrame:
     conn = st.connection("sql")
     with conn.session as session:
-        result = session.execute(text("SELECT * FROM material_movements"))
-        return pd.DataFrame(result.fetchall())
+        # London wall-clock in SQL so it compares against stock take dates (see README timezone note)
+        result = session.execute(text(
+            "SELECT id, created_by, material, quantity,"
+            " (created_at AT TIME ZONE 'Europe/London') AS created_at"
+            " FROM material_movements"
+        ))
+        return pd.DataFrame(result.fetchall(), columns=list(result.keys()))

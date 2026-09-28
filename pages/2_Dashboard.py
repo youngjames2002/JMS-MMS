@@ -178,38 +178,47 @@ st.markdown("## Change Since Last Full Stock Take")
 stc1,stc2=st.columns(2)
 
 all_sts = flat_stock_take_read_from_db()
+# no st.stop() here - it would also hide the sections below that don't need a stock take
 if all_sts.empty:
     st.info("No stock takes recorded yet, so there is nothing to compare live stock against.")
-    st.stop()
-all_sts = all_sts.sort_values("created_at", ascending=False).reset_index(drop=True)
-all_sts["formatted_date"] = all_sts["created_at"].dt.strftime("%B %d, %Y at %I:%M %p")
-latest_st_row = all_sts.iloc[0]
- # time since taken - created_at arrives as a naive Europe/London wall-clock, so compare it
-# against today in the same zone rather than a tz-aware UTC now (naive minus aware would raise)
-today = pd.Timestamp.now(tz="Europe/London").tz_localize(None).normalize()
-days_since = (today - latest_st_row["created_at"].normalize()).days
-stc1.write(f"{days_since} Day(s) since last Stock Take")
-stc1.write(f"Taken By {latest_st_row['created_by']} on {latest_st_row['formatted_date']}")
-latest_st = pd.DataFrame(latest_st_row["data"])[["Material", "Quantity", "Location"]]
+else:
+    all_sts = all_sts.sort_values("created_at", ascending=False).reset_index(drop=True)
+    all_sts["formatted_date"] = all_sts["created_at"].dt.strftime("%B %d, %Y at %I:%M %p")
+    latest_st_row = all_sts.iloc[0]
+    # time since taken - created_at arrives as a naive Europe/London wall-clock, so compare it
+    # against today in the same zone rather than a tz-aware UTC now (naive minus aware would raise)
+    today = pd.Timestamp.now(tz="Europe/London").tz_localize(None).normalize()
+    days_since = (today - latest_st_row["created_at"].normalize()).days
+    stc1.write(f"{days_since} Day(s) since last Stock Take")
+    stc1.write(f"Taken By {latest_st_row['created_by']} on {latest_st_row['formatted_date']}")
+    latest_st = pd.DataFrame(latest_st_row["data"])[["Material", "Quantity"]]
 
-# total movement of material
-movement = latest_st.rename(columns={"Quantity": "At Last Stock Take"}).merge(
-    stock_df[["material", "quantity"]].rename(
-        columns={"material": "Material", "quantity": "Live Stock"}
-    ),
-    on="Material",
-    how="outer",
-)
-movement["Change"] = movement["Live Stock"] - movement["At Last Stock Take"]
+    # total per material first - merging location rows on material alone multiplies them together,
+    # and movements are only logged per material anyway
+    movement = pd.concat(
+        [
+            latest_st.groupby("Material")["Quantity"].sum().rename("At Last Stock Take"),
+            stock_df.groupby("material")["quantity"].sum().rename("Live Stock"),
+        ],
+        axis=1,
+    ).fillna(0.0)  # missing on one side means none there, e.g. a material used up since the take
+    movement = movement.rename_axis("Material").reset_index()
+    movement["Change"] = movement["Live Stock"] - movement["At Last Stock Take"]
 
-stc2.metric(label="Total Material +/- Since Last Take", value=movement["Change"].sum())
+    # who used/delivered each material since the stock take
+    movements = get_material_movements()
+    movements = movements[movements["created_at"] >= latest_st_row["created_at"]]
+    movers = movements.dropna(subset=["created_by"]).groupby("material")["created_by"].agg(lambda users: ", ".join(users.unique()))
+    movement["Moved By"] = movement["Material"].map(movers)
 
-# table per material type
-st.dataframe(
-    movement[movement["Change"] != 0], 
-    hide_index=True,
-    column_config={"Change": st.column_config.NumberColumn("Change", format="%+.1f")}
-)
+    stc2.metric(label="Total Material +/- Since Last Take", value=movement["Change"].sum())
+
+    # table per material type
+    st.dataframe(
+        movement[movement["Change"] != 0],
+        hide_index=True,
+        column_config={"Change": st.column_config.NumberColumn("Change", format="%+.1f")}
+    )
 
 # po lines
 st.markdown("## Incoming Orders")
@@ -235,13 +244,3 @@ elif po_lines is not None:
             "date_promised": st.column_config.DateColumn("Date Promised", format="DD MMM YYYY"),
         },
     )
-
-# material movements
-st.markdown("## Material Movements")
-movements = get_material_movements()
-st.dataframe(movements[["created_at","created_by", "material", "quantity"]].sort_values("created_at", ascending=False), hide_index=True, width="stretch", column_config={
-    "created_at": st.column_config.DateColumn("Date", format="DD MMM YYYY HH:mm"),
-    "created_by": "User",
-    "material": "Material",
-    "quantity": st.column_config.NumberColumn("Quantity", format="%.1f")
-},)
