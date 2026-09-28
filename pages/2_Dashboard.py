@@ -244,3 +244,5 @@ elif po_lines is not None:
             "date_promised": st.column_config.DateColumn("Date Promised", format="DD MMM YYYY"),
         },
     )
+
+st.button("Refresh", icon=":material/refresh:", on_click=st.cache_data.clear)
