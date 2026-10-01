@@ -205,19 +205,22 @@ else:
     movement = movement.rename_axis("Material").reset_index()
     movement["Change"] = movement["Live Stock"] - movement["At Last Stock Take"]
 
-    # who used/delivered each material since the stock take
-    movements = get_material_movements()
-    movements = movements[movements["created_at"] >= latest_st_row["created_at"]]
-    movers = movements.dropna(subset=["created_by"]).groupby("material")["created_by"].agg(lambda users: ", ".join(users.unique()))
-    movement["Moved By"] = movement["Material"].map(movers)
-
     stc2.metric(label="Total Material +/- Since Last Take", value=movement["Change"].sum())
 
-    # table per material type
+    # every usage/delivery since the stock take as its own row, oldest first - grouping by material
+    # collapsed several moves by the same person into one net figure
+    movements = get_material_movements()
+    movements = movements[movements["created_at"] >= latest_st_row["created_at"]].sort_values(["created_at", "id"])
+    movements["quantity"] = movements["quantity"].astype(float)
     st.dataframe(
-        movement[movement["Change"] != 0],
+        movements[["created_at", "material", "quantity", "created_by"]],
         hide_index=True,
-        column_config={"Change": st.column_config.NumberColumn("Change", format="%+.1f")}
+        column_config={
+            "created_at": st.column_config.DatetimeColumn("When", format="DD MMM YYYY HH:mm"),
+            "material": "Material",
+            "quantity": st.column_config.NumberColumn("Change", format="%+.1f"),
+            "created_by": "Moved By",
+        },
     )
 
 # po lines

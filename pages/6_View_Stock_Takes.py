@@ -2,7 +2,7 @@
 # view history of previous stock takes
 
 import streamlit as st
-from data import flat_stock_take_read_from_db, get_standard_descriptions
+from data import flat_stock_take_read_from_db, get_standard_descriptions, live_stock_read_from_db
 import pandas as pd
 import plotly.express as px
 from ui import page_setup, stop_if_empty
@@ -15,7 +15,11 @@ all_sts = all_sts.sort_values("created_at", ascending=False).reset_index(drop=Tr
 all_sts["formatted_date"] = all_sts["created_at"].dt.strftime("%B %d, %Y at %I:%M %p")
 latest_st_row = all_sts.iloc[0]
 st.write(f"Taken By {latest_st_row['created_by']} on {latest_st_row['formatted_date']}")
-st.dataframe(pd.DataFrame(latest_st_row["data"])[["Material", "Quantity", "Location"]])
+latest_st = pd.DataFrame(latest_st_row["data"])[["Material", "Quantity", "Location"]].rename(columns={"Quantity": "Count at Stock Take"})
+# a material missing from live stock has none there
+live_stock = live_stock_read_from_db().set_index("material")["quantity"].astype(float)
+latest_st["Live Stock"] = latest_st["Material"].map(live_stock).fillna(0.0)
+st.dataframe(latest_st)
 
 st.markdown("# See History per Material Type")
 material = st.selectbox("Material", options=get_standard_descriptions())
