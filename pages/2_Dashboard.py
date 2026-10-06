@@ -212,6 +212,13 @@ else:
     movements = get_material_movements()
     movements = movements[movements["created_at"] >= latest_st_row["created_at"]].sort_values(["created_at", "id"])
     movements["quantity"] = movements["quantity"].astype(float)
+
+    # daily report
+    days = movements["created_at"].dt.normalize().unique()
+    selected_day = st.selectbox("View movements on", days, format_func=lambda d: d.strftime("%A %d %B %Y"), key="movement_day", index=None)
+    if selected_day is not None:
+        movements = movements[movements["created_at"].dt.normalize() == selected_day]
+
     st.dataframe(
         movements[["created_at", "material", "quantity", "created_by"]],
         hide_index=True,
